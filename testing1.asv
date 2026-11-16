@@ -1,0 +1,285 @@
+% compare_q_methods_paper_style.m
+% Paper-style comparison of quaternion inverse methods.
+clear; close all; clc;
+rng(0);
+
+%% Sweep sizes (edit here if desired)
+sizes = 200:25:800;
+numN = numel(sizes);
+
+%% Params
+tol = 1e-10;
+max_outer = 500;
+
+% method slots: 2=SAI, 3=NS p=19, 4=Hyper19, 5=NS p=10
+display_order = [4,2,3,5]; % plotting order
+display_names = {'QHPI19','QSAI','QHONSchultz(order 19)','QHONSchultz(order 10)'};
+
+% Storage
+Times      = NaN(5,numN);
+Iters      = NaN(5,numN);
+Err_AXherm = NaN(5,numN);
+Err_XAherm = NaN(5,numN);
+Err_AXA    = NaN(5,numN);
+Err_XAX    = NaN(5,numN);
+Rel_AXA    = NaN(5,numN);
+Rel_XAX    = NaN(5,numN);
+
+% Figures folder
+figures_folder = fullfile(pwd,'figures');
+if ~exist(figures_folder,'dir')
+    mkdir(figures_folder);
+end
+
+fprintf('Sweep using embedding-based alp for initializer; sizes %d:%d:%d\n', sizes(1), sizes(2)-sizes(1), sizes(end));
+
+%% Main sweep
+for ss = 1:numN
+    n = sizes(ss);
+    fprintf('\n--- size n = %d (%d/%d) ---\n', n, ss, numN);
+
+    % build random quaternion matrix A
+    A0 = randn(n,n); A1 = randn(n,n);
+    A2 = randn(n,n); A3 = randn(n,n);
+    A = quaternion(A0, A1, A2, A3);
+
+    % compute alp via complex embedding (initializer)
+    A11 = complex(A0, A1);
+    A12 = complex(A2, A3);
+    CA = [A11, A12; -conj(A12), conj(A11)];
+    svals = svd(CA, 'econ');
+    alp = 1/(max(svals)^2 + eps);
+
+    % initial guesses
+    X0_conjAH = alp * (conj(A).');   % used by SAI and NS runs
+    X0_Atrans = alp * A';            % used by Hyper19 per your snippet
+
+    normA = norm(A, 'fro');
+
+    %% QHPI19 (quaternion_Hyper19) -> slot 4
+    if exist('quaternion_Hyper19','file') == 2
+        try
+            t0 = tic;
+            try
+                [Xh, it_h] = quaternion_Hyper19(A, X0_Atrans, tol);
+            catch
+                [Xh, it_h] = quaternion_Hyper19(A, X0_Atrans);
+            end
+            Times(4, ss) = toc(t0); Iters(4, ss) = it_h;
+            Err_AXherm(4, ss) = norm((A*Xh)'-A*Xh,'fro');
+            Err_XAherm(4, ss) = norm((Xh*A)'-Xh*A,'fro');
+            Err_AXA(4, ss) = norm(A*Xh*A - A,'fro');
+            Err_XAX(4, ss) = norm(Xh*A*Xh - Xh,'fro');
+            Rel_AXA(4, ss) = Err_AXA(4, ss) / max(eps, normA);
+            Rel_XAX(4, ss) = Err_XAX(4, ss) / max(eps, norm(Xh,'fro'));
+            fprintf('QHPI19: time=%.3fs, iters=%d, rel_AXA=%.3e\n', Times(4,ss), Iters(4,ss), Rel_AXA(4,ss));
+        catch ME
+            warning('quaternion_Hyper19 failed at n=%d: %s', n, ME.message);
+        end
+    else
+        fprintf('quaternion_Hyper19 not found -> skipped for n=%d\n', n);
+    end
+
+    %% QSAI (quaternion_SAI1) -> slot 2
+    if exist('quaternion_SAI1','file') == 2
+        try
+            t0 = tic;
+            try
+                [Xs, it_s] = quaternion_SAI1(A, alp, tol);
+            catch
+                try
+                    [Xs, it_s] = quaternion_SAI1(A, X0_conjAH, tol);
+                catch
+                    [Xs, it_s] = quaternion_SAI1(A, X0_conjAH);
+                end
+            end
+            Times(2, ss) = toc(t0); Iters(2, ss) = it_s;
+            Err_AXherm(2, ss) = norm((A*Xs)'-A*Xs,'fro');
+            Err_XAherm(2, ss) = norm((Xs*A)'-Xs*A,'fro');
+            Err_AXA(2, ss) = norm(A*Xs*A - A,'fro');
+            Err_XAX(2, ss) = norm(Xs*A*Xs - Xs,'fro');
+            Rel_AXA(2, ss) = Err_AXA(2, ss) / max(eps, normA);
+            Rel_XAX(2, ss) = Err_XAX(2, ss) / max(eps, norm(Xs,'fro'));
+            fprintf('QSAI:   time=%.3fs, iters=%d, rel_AXA=%.3e\n', Times(2,ss), Iters(2,ss), Rel_AXA(2,ss));
+        catch ME
+            warning('quaternion_SAI1 failed at n=%d: %s', n, ME.message);
+        end
+    else
+        fprintf('quaternion_SAI1 not found -> skipped for n=%d\n', n);
+    end
+
+    %% QHONSchultz(order 19) -> slot 3 (ns_hyperpower_left p=19)
+    try
+        X = X0_conjAH;
+        t0 = tic;
+        it_ns = max_outer;
+        for k = 1:max_outer
+            Xnext = ns_hyperpower_left(A, X, 19);
+            if norm(Xnext - X, 'fro') < tol
+                X = Xnext; it_ns = k; break;
+            end
+            X = Xnext;
+        end
+        Times(3, ss) = toc(t0); Iters(3, ss) = it_ns;
+        Err_AXherm(3, ss) = norm((A*X)'-A*X,'fro');
+        Err_XAherm(3, ss) = norm((X*A)'-X*A,'fro');
+        Err_AXA(3, ss) = norm(A*X*A - A,'fro');
+        Err_XAX(3, ss) = norm(X*A*X - X,'fro');
+        Rel_AXA(3, ss) = Err_AXA(3, ss) / max(eps, normA);
+        Rel_XAX(3, ss) = Err_XAX(3, ss) / max(eps, norm(X,'fro'));
+        fprintf('QHON19: time=%.3fs, outer_iters=%d, rel_AXA=%.3e\n', Times(3,ss), Iters(3,ss), Rel_AXA(3,ss));
+    catch ME
+        warning('ns_hyperpower_left p=19 failed at n=%d: %s', n, ME.message);
+    end
+
+    %% QHONSchultz(order 10) -> slot 5 (ns_hyperpower_left p=10)
+    try
+        X = X0_conjAH;
+        t0 = tic;
+        it_ns = max_outer;
+        for k = 1:max_outer
+            Xnext = ns_hyperpower_left(A, X, 10);
+            if norm(Xnext - X, 'fro') < tol
+                X = Xnext; it_ns = k; break;
+            end
+            X = Xnext;
+        end
+        Times(5, ss) = toc(t0); Iters(5, ss) = it_ns;
+        Err_AXherm(5, ss) = norm((A*X)'-A*X,'fro');
+        Err_XAherm(5, ss) = norm((X*A)'-X*A,'fro');
+        Err_AXA(5, ss) = norm(A*X*A - A,'fro');
+        Err_XAX(5, ss) = norm(X*A*X - X,'fro');
+        Rel_AXA(5, ss) = Err_AXA(5, ss) / max(eps, normA);
+        Rel_XAX(5, ss) = Err_XAX(5, ss) / max(eps, norm(X,'fro'));
+        fprintf('QHON10: time=%.3fs, outer_iters=%d, rel_AXA=%.3e\n', Times(5,ss), Iters(5,ss), Rel_AXA(5,ss));
+    catch ME
+        warning('ns_hyperpower_left p=10 failed at n=%d: %s', n, ME.message);
+    end
+end
+
+%% === Global Style Defaults (paper style) ===
+fs = 24;          % base font size for axes/labels
+lineW = 3.5;      % line width
+markerSz = 10;    % marker size
+
+set(groot, 'defaultTextInterpreter','latex', ...
+           'defaultAxesTickLabelInterpreter','latex', ...
+           'defaultLegendInterpreter','latex', ...
+           'defaultAxesFontSize', fs, ...
+           'defaultAxesLineWidth', 3.0, ...
+           'defaultLineLineWidth', lineW, ...
+           'defaultLineMarkerSize', markerSz, ...
+           'defaultFigureColor','w', ...
+           'defaultFigurePaperPositionMode','auto');
+set(groot,'defaultAxesLabelFontSizeMultiplier',1.5);
+set(groot,'defaultAxesTitleFontSizeMultiplier',1);
+
+%% Prepare arrays for display (order: Hyper19, SAI1, NS19, NS10)
+idx = display_order;
+Times_disp = Times(idx, :);
+Rel_AXA_disp = Rel_AXA(idx, :);
+Rel_XAX_disp = Rel_XAX(idx, :);
+Err_AXherm_disp = Err_AXherm(idx, :);
+Err_XAherm_disp = Err_XAherm(idx, :);
+
+%% ----------------------------
+%% Plot: CPU time (thick lines, no title)
+%% ----------------------------
+marker = '-o';
+fig2 = figure('Units','normalized','Position',[0.12 0.10 0.60 0.65],'Color','w');
+axF = axes('Parent',fig2); hold(axF,'on'); grid(axF,'on'); box(axF,'on');
+for m = 1:size(Times_disp,1)
+    plot(axF, sizes, Times_disp(m,:), marker, 'LineWidth', 3, 'MarkerSize', markerSz);
+end
+xlabel(axF,'Matrix size $n$','Interpreter','latex','FontSize',fs*1.2);
+ylabel(axF,'CPU time (s)','Interpreter','latex','FontSize',fs*1.2);
+legend(axF, display_names,'Location','northwest','Interpreter','latex');
+xlim(axF,[min(sizes) max(sizes)]);
+save_figure_safe(fig2, figures_folder, 'cpu_time_customOrder');
+
+%% ----------------------------
+%% Plot: Rel ||AXA-A|| / ||A|| (semilogy)
+%% ----------------------------
+fig3 = figure('Units','normalized','Position',[0.12 0.10 0.60 0.65],'Color','w');
+ax3 = axes('Parent',fig3); hold(ax3,'on'); grid(ax3,'on'); box(ax3,'on');
+set(ax3,'YScale','log');
+for m = 1:size(Rel_AXA_disp,1)
+    semilogy(ax3, sizes, Rel_AXA_disp(m,:), marker, 'LineWidth', 3, 'MarkerSize', markerSz);
+end
+xlabel(ax3,'Matrix size $n$','Interpreter','latex','FontSize',fs*1.2);
+ylabel(ax3,'$\|AXA - A\|_F / \|A\|_F$','Interpreter','latex','FontSize',fs*1.2);
+legend(ax3, display_names,'Location','northeast','Interpreter','latex');
+save_figure_safe(fig3, figures_folder, 'rel_AXA_customOrder');
+
+%% ----------------------------
+%% Plot: Rel ||XAX-X|| / ||X|| (semilogy)
+%% ----------------------------
+fig4 = figure('Units','normalized','Position',[0.12 0.10 0.60 0.65],'Color','w');
+ax4 = axes('Parent',fig4); hold(ax4,'on'); grid(ax4,'on'); box(ax4,'on');
+set(ax4,'YScale','log');
+for m = 1:size(Rel_XAX_disp,1)
+    semilogy(ax4, sizes, Rel_XAX_disp(m,:), marker, 'LineWidth', 3, 'MarkerSize', markerSz);
+end
+xlabel(ax4,'Matrix size $n$','Interpreter','latex','FontSize',fs*1.2);
+ylabel(ax4,'$\|XAX - X\|_F / \|X\|_F$','Interpreter','latex','FontSize',fs*1.2);
+legend(ax4, display_names,'Location','northeast','Interpreter','latex');
+save_figure_safe(fig4, figures_folder, 'rel_XAX_customOrder');
+
+%% ----------------------------
+%% Final detailed table for last size
+%% ----------------------------
+lastIdx = numN;
+fprintf('\n===== Detailed results for n = %d =====\n', sizes(lastIdx));
+fprintf('%-30s %-10s %-8s %-14s %-14s %-12s %-12s\n', ...
+    'Method','Time(s)','Iters','||AX-(AX)^H||','||(XA)^H-XA||','||AXA-A||','||XAX-X||');
+for i = 1:numel(idx)
+    mslot = idx(i);
+    fprintf('%-30s %-10.3e %-8d %-14.2e %-14.2e %-12.2e %-12.2e\n', ...
+        display_names{i}, Times_disp(i,lastIdx), Iters(mslot,lastIdx), ...
+        Err_AXherm_disp(i,lastIdx), Err_XAherm_disp(i,lastIdx), ...
+        Err_AXA(mslot,lastIdx), Err_XAX(mslot,lastIdx));
+end
+
+fprintf('\nDone. Figures saved to: %s\n', figures_folder);
+
+%% ----------------------------
+%% Helper: save_figure_safe (saves .fig, .eps, .pdf)
+%% ----------------------------
+function save_figure_safe(figHandle, outDir, baseName)
+    if ~exist(outDir,'dir'), mkdir(outDir); end
+    figName = fullfile(outDir, [baseName, '.fig']);
+    epsName = fullfile(outDir, [baseName, '.eps']);
+    pdfName = fullfile(outDir, [baseName, '.pdf']);
+    % Save .fig
+    try
+        savefig(figHandle, figName);
+    catch ME
+        warning('savefig failed for %s: %s', figName, ME.message);
+    end
+    % Try exportgraphics (R2020a+)
+    if exist('exportgraphics','file')
+        try
+            exportgraphics(figHandle, epsName, 'ContentType','vector');
+        catch ME
+            warning('exportgraphics EPS failed for %s: %s', epsName, ME.message);
+        end
+        try
+            exportgraphics(figHandle, pdfName, 'ContentType','vector');
+        catch ME
+            warning('exportgraphics PDF failed for %s: %s', pdfName, ME.message);
+        end
+        return;
+    end
+    % Fallback to print
+    try
+        set(figHandle, 'Renderer', 'painters');
+        print(figHandle, epsName, '-depsc2', '-r300');
+    catch ME
+        warning('print EPS failed for %s: %s', epsName, ME.message);
+    end
+    try
+        print(figHandle, pdfName, '-dpdf', '-r300');
+    catch ME
+        warning('print PDF failed for %s: %s', pdfName, ME.message);
+    end
+end
